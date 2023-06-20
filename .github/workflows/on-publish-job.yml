@@ -1,0 +1,99 @@
+name: "🚀 Merge CD Workflow"
+
+on:
+  workflow_call:
+    secrets:
+      aws-access-key-id:
+        required: true
+      aws-secret-access-key:
+        required: true
+      aws-session-token:
+        required: true
+      aws-region:
+        required: true
+      aws-account-id:
+        required: true
+
+jobs:
+  prepare-environment:
+    name: "🌱Prepare Environment"
+    runs-on: ubuntu-20.04
+    steps:
+      - name: "📥Checkout Code"
+        uses: actions/checkout@v2
+
+      - name: "🔧Configure AWS Credentials"
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.aws-access-key-id }}
+          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
+          aws-session-token: ${{ secrets.aws-session-token }}
+          aws-region: ${{ secrets.aws-region }}
+
+      - name: "📂Mount Directory"
+        run: |
+          rsync -av --exclude=".git" --exclude="source" --exclude=".github" ./ source
+
+      - name: "🔒Login to Amazon ECR"
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: "💾Save Build Image"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          mkdir -p /tmp
+          docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest
+          docker save -o /tmp/build-image.tar $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest
+
+      - name: "🧣Cache Reusable Files"
+        uses: actions/cache@v2
+        with:
+          path: ./source
+          key: ${{ runner.os }}-reusable-files-${{ hashFiles('./source') }}
+
+      - name: "🧣Cache Build Image"
+        uses: actions/cache@v2
+        with:
+          path: /tmp/build-image.tar
+          key: ${{ runner.os }}-python-runner-${{ hashFiles('/tmp/build-image.tar') }}
+
+  deploy:
+    name: "🛳️Deploy Artifact"
+    needs: prepare-environment
+    runs-on: ubuntu-20.04
+    steps:
+      - name: "⚙️Setting up Reusable Files"
+        uses: actions/cache@v2
+        with:
+          path: ./source
+          key: ${{ runner.os }}-reusable-files-${{ hashFiles('./source') }}
+
+      - name: "⚙️Setting up Build Cache"
+        uses: actions/cache@v2
+        with:
+          path: /tmp/build-image.tar
+          key: ${{ runner.os }}-python-runner-${{ hashFiles('/tmp/build-image.tar') }}
+
+      - name: "⌛Loading up Build Image"
+        run: |
+          docker load --input /tmp/build-image.tar
+
+      - name: "📦Publishing Artifact"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          docker run -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "publish_artifacts", "git": {"commit": "${{ github.sha }}", "branch": "${{ github.head_ref }}", "repo_name": "${{ github.repository }}", "url": "${{ github.repository_url }}"}}'
+
+  clean-up:
+    name: "🧹Cleaning up Cache"
+    needs: deploy
+    runs-on: ubuntu-20.04
+    if: always() || needs.post-test-publish-report.result == 'failure'
+    steps:
+      - name: Clear caches
+        uses: easimon/wipe-cache@main
+        with:
+          dry-run: 'false'
