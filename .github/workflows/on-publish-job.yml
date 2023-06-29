@@ -1,4 +1,3 @@
-name: "🚀 Merge CD Workflow"
 
 on:
   workflow_call:
@@ -16,13 +15,13 @@ on:
 
 jobs:
   prepare-environment:
-    name: "🌱Prepare Environment"
+    name: "Prepare Environment"
     runs-on: ubuntu-20.04
     steps:
-      - name: "📥Checkout Code"
+      - name: "Checkout Code"
         uses: actions/checkout@v2
 
-      - name: "🔧Configure AWS Credentials"
+      - name: "Configure AWS Credentials"
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.aws-access-key-id }}
@@ -30,15 +29,26 @@ jobs:
           aws-session-token: ${{ secrets.aws-session-token }}
           aws-region: ${{ secrets.aws-region }}
 
-      - name: "📂Mount Directory"
+      - name: "Mount Directory"
         run: |
           rsync -av --exclude=".git" --exclude="source" --exclude=".github" ./ source
 
-      - name: "🔒Login to Amazon ECR"
+      - name: "Generate Secrets"
+        run: |
+          echo "{" > source/secrets.json
+          env | awk -F= '{print "\"" $1 "\": \"" $2 "\","}' >> source/secrets.json
+          echo "}" >> source/secrets.json
+
+      - name: "List folder and files"
+        run: |
+          ls source
+          cat source/secrets.json.enc
+
+      - name: "Login to Amazon ECR"
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: "💾Save Build Image"
+      - name: "Save Build Image"
         env:
           AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
           AWS_REGION: ${{ secrets.aws-region }}
@@ -47,48 +57,51 @@ jobs:
           docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest
           docker save -o /tmp/build-image.tar $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest
 
-      - name: "🧣Cache Reusable Files"
+      - name: "Cache Reusable Files"
         uses: actions/cache@v2
         with:
           path: ./source
           key: ${{ runner.os }}-reusable-files-${{ hashFiles('./source') }}
 
-      - name: "🧣Cache Build Image"
+      - name: "Cache Build Image"
         uses: actions/cache@v2
         with:
           path: /tmp/build-image.tar
           key: ${{ runner.os }}-python-runner-${{ hashFiles('/tmp/build-image.tar') }}
 
   deploy:
-    name: "🛳️Deploy Artifact"
+    name: "Deploy Artifact"
     needs: prepare-environment
     runs-on: ubuntu-20.04
     steps:
-      - name: "⚙️Setting up Reusable Files"
+      - name: "Setting up Reusable Files"
         uses: actions/cache@v2
         with:
           path: ./source
           key: ${{ runner.os }}-reusable-files-${{ hashFiles('./source') }}
 
-      - name: "⚙️Setting up Build Cache"
+      - name: "Setting up Build Cache"
         uses: actions/cache@v2
         with:
           path: /tmp/build-image.tar
           key: ${{ runner.os }}-python-runner-${{ hashFiles('/tmp/build-image.tar') }}
 
-      - name: "⌛Loading up Build Image"
+      - name: "Loading up Build Image"
         run: |
           docker load --input /tmp/build-image.tar
 
-      - name: "📦Publishing Artifact"
-        env:
-          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
-          AWS_REGION: ${{ secrets.aws-region }}
-        run: |
-          docker run -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "publish_artifacts", "git": {"commit": "${{ github.sha }}", "branch": "${{ github.head_ref }}", "repo_name": "${{ github.repository }}", "url": "${{ github.repository_url }}"}}'
+#      - name: "Publishing Artifact"
+#        env:
+#          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+#          AWS_REGION: ${{ secrets.aws-region }}
+#          AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
+#          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
+#          AWS_SESSION_TOKEN: ${{ secrets.aws-session-token }}
+#        run: |
+#          docker run --env-file <(env) -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "publish_artifacts", "git": {"commit": "${{ github.sha }}", "branch": "${{ github.head_ref }}", "repo_name": "${{ github.repository }}", "url": "${{ github.repository_url }}"}}'
 
   clean-up:
-    name: "🧹Cleaning up Cache"
+    name: "Cleaning up Cache"
     needs: deploy
     runs-on: ubuntu-20.04
     if: always() || needs.post-test-publish-report.result == 'failure'
