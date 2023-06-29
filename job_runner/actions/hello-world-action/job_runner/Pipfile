@@ -1,0 +1,33 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[[source]]
+url = "https://nexus.internal.artemishealth.com/repository/pypi-hosted/simple/"
+verify_ssl = true
+name = "nexusinternalartemishealth"
+
+[packages]
+docker = "==6.0.1"
+jira = "==3.4.1"
+protobuf = "==3.20.3"
+pyyaml = "==6.0"
+version-parser = "==1.0.1"
+boto3 = "==1.26.64"
+pymsteams = "==0.2.2"
+asyncio = "==3.4.3"
+httpx = "==0.23.0"
+cadmus = {version = ">=0.0.71,<0.1", index = "nexusinternalartemishealth"}
+kubernetes = "==26.1.0"
+gitpython = "==3.1.31"
+
+[dev-packages]
+pytest = "==7.2.1"
+pytest-cov = "==3.0.0"
+pytest-env = "*"
+
+[prod-packages]
+
+[requires]
+python_version = "3.10"

@@ -1,0 +1,238 @@
+name: "🚀 Pull Request CI Workflow"
+
+
+on:
+  workflow_call:
+    inputs:
+      coverage-report-path:
+        type: string
+      test-container-name:
+        type: string
+      test-image-available:
+        required: true
+        type: boolean
+    secrets:
+      aws-access-key-id:
+        required: true
+      aws-secret-access-key:
+        required: true
+      aws-session-token:
+        required: true
+      aws-region:
+        required: true
+      aws-account-id:
+        required: true
+
+jobs:
+  prepare-environment:
+    name: "🌱Prepare Environment"
+    runs-on: ubuntu-20.04
+    steps:
+      - name: "📥Checkout Code"
+        uses: actions/checkout@v2
+
+      - name: "🔧Configure AWS Credentials"
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.aws-access-key-id }}
+          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
+          aws-session-token: ${{ secrets.aws-session-token }}
+          aws-region: ${{ secrets.aws-region }}
+
+      - name: "📂Mount Directory"
+        run: |
+          echo "Test image: ${{ inputs.test-image-available }}, ${{ inputs.test-container-name }}, ${{ inputs.coverage-report-path }}"
+          rsync -av --exclude=".git" --exclude="source" --exclude=".github" ./ source
+
+      - name: "🔒Login to Amazon ECR"
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: "💾Save Build Image"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          mkdir -p /tmp
+          docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest
+          docker save -o /tmp/build-image.tar $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest
+
+      - name: "🧣Cache Reusable Files"
+        uses: actions/cache@v2
+        with:
+          path: ./source
+          key: ${{ github.run_number }}-reusable-files-${{ hashFiles('./source') }}
+
+      - name: "🧣Cache Build Image"
+        uses: actions/cache@v2
+        with:
+          path: /tmp/build-image.tar
+          key: ${{ github.run_number }}-python-runner-${{ hashFiles('/tmp/build-image.tar') }}
+
+  validate-build:
+    name: "✅Validate Env/Artifact"
+    needs: prepare-environment
+    runs-on: ubuntu-20.04
+    steps:
+      - name: "⚙️Setting up Reusable Files"
+        uses: actions/cache@v2
+        with:
+          path: ./source
+          key: ${{ github.run_number }}-reusable-files-${{ hashFiles('./source') }}
+
+      - name: "⚙️Setting up Build Cache"
+        uses: actions/cache@v2
+        with:
+          path: /tmp/build-image.tar
+          key: ${{ github.run_number }}-python-runner-${{ hashFiles('/tmp/build-image.tar') }}
+
+      - name: "⌛Loading up Build Image"
+        run: |
+          docker load --input /tmp/build-image.tar
+
+      - name: "✅Verify Environment"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          echo "Verifying the environment..."
+          docker run -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "verify_environment"}'
+
+      - name: "📋Validate Ballista"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          echo "Validating the Ballista configuration..."
+          docker run -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "validate_ballista_yml"}'
+
+      - name: "🔍Validate Artifact"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          echo "Validating the artifact..."
+          docker run -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "validate_artifact"}'   
+
+      - name: "🔍Validate Commit History"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          echo "Validating the commit history..."
+          docker run -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "validate_commit_history", "git": {"commit": "${{ github.sha }}", "branch": "${{ github.head_ref }}", "repo_name": "${{ github.repository }}", "url": "${{ github.repository_url }}"}}'          
+
+  build-coverage-export:
+    name: "🏗️ Build Artifact"
+    needs: prepare-environment
+    runs-on: ubuntu-20.04
+    steps:
+      - name: "⚙️Setting up Reusable Files"
+        uses: actions/cache@v2
+        with:
+          path: ./source
+          key: ${{ github.run_number }}-reusable-files-${{ hashFiles('./source') }}
+
+      - name: "⚙️Setting up Build Cache"
+        uses: actions/cache@v2
+        with:
+          path: /tmp/build-image.tar
+          key: ${{ github.run_number }}-python-runner-${{ hashFiles('/tmp/build-image.tar') }}
+
+      - name: "⌛Loading up Build Image"
+        run: |
+          docker load --input /tmp/build-image.tar
+
+      - name: "🐍Install Python"
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.x
+      - run: pip install pyyaml
+
+      - name: "🔍Extract Ballista Version"
+        id: extract-version
+        run: |
+          BUILD_VERSION=$(python -c "import yaml; f = open('source/ballista.yml', 'r'); data = yaml.safe_load(f); f.close(); print(data['build_version'])")
+          echo "BUILD_VERSION=$BUILD_VERSION" >> $GITHUB_ENV
+
+      - name: "🏗️Build Version"
+        run: |
+          FULL_REPO_NAME=${{github.repository}}
+          REPO_NAME=${FULL_REPO_NAME#*/}  # Extract repository name excluding company name
+          echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+          echo "🔨 Ballista Build Version: $BUILD_VERSION & Repository Name: $REPO_NAME"
+
+      - name: "🏗️Build Artifacts"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          echo "Building the artifacts..."
+          docker run -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "build_artifacts", "git": {"commit": "${{ github.sha }}", "branch": "${{ github.head_ref }}", "repo_name": "${{ github.repository }}", "url": "${{ github.repository_url }}"}}'          
+
+      - name: "📦Export Coverage Report"
+        if: ${{ inputs.test-image-available == true }}
+        run: |
+          echo "Exporting the coverage report... ${{ inputs.test-container-name }}"
+          docker run --name $REPO_NAME-test-container ${{ inputs.test-container-name }}:$BUILD_VERSION
+          docker cp $REPO_NAME-test-container:${{ inputs.coverage-report-path }} /tmp/coverage-report.xml || echo "Failed to export coverage report for $REPO_NAME due to an unavailable test container"
+
+      - name: "🧣Cache Coverage Report"
+        if: ${{ inputs.test-image-available == true }}
+        uses: actions/cache@v2
+        with:
+          path: /tmp/coverage-report.xml
+          key: ${{ github.run_number }}-coverage-report-${{ hashFiles('/tmp/coverage-report.xml') }}
+
+  post-test-publish-report:
+    name: "📝Publish Report"
+    needs: build-coverage-export
+    runs-on: ubuntu-20.04
+    if: ${{ inputs.test-image-available == true }}
+    steps:
+      - name: "⚙️Setting up Reusable Files"
+        uses: actions/cache@v2
+        with:
+          path: ./source
+          key: ${{ github.run_number }}-reusable-files-${{ hashFiles('./source') }}
+
+      - name: "⚙️Setting up Build Cache"
+        uses: actions/cache@v2
+        with:
+          path: /tmp/build-image.tar
+          key: ${{ github.run_number }}-python-runner-${{ hashFiles('/tmp/build-image.tar') }}
+
+      - name: "⌛Loading up Build Image"
+        run: |
+          docker load --input /tmp/build-image.tar
+
+      - name: "⌛Loading Coverage Report"
+        uses: actions/cache@v2
+        with:
+          path: /tmp/coverage-report.xml
+          key: ${{ github.run_number }}-coverage-report-${{ hashFiles('/tmp/coverage-report.xml') }}
+
+      - name: "✅ Run Post-Build Tests"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.aws-account-id }}
+          AWS_REGION: ${{ secrets.aws-region }}
+        run: |
+          echo "Running post-build tests..."
+          docker run -v $PWD/source:/source -v /var/run/docker.sock:/var/run/docker.sock $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/python-runner:latest '{"job_name": "run_post_build_tests"}'
+
+      - name: "📤Publish Coverage Report"
+        uses: actions/upload-artifact@v2
+        with:
+          name: Coverage Report
+          path: /tmp/coverage-report.xml
+
+  cache-cleanup:
+    name: "🧹Cleaning up Cache"
+    needs: post-test-publish-report
+    runs-on: ubuntu-20.04
+    if: always() || needs.post-test-publish-report.result == 'failure'
+    steps:
+      - name: Clear caches
+        uses: easimon/wipe-cache@main
+        with:
+          dry-run: 'false'
